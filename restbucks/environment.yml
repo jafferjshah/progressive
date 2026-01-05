@@ -1,0 +1,11 @@
+name: restbucks
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - fastapi
+    - uvicorn
+    - httpx
+    - requests
