@@ -1,164 +1,168 @@
 """
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
+
+v2: Now with classes!
 """
 
-# our "database"
-orders = {}
-next_order_id = 1
+class Order:
+    def __init__(self, id, drink, size="medium", milk="whole", shots=1):
+        self.id = id
+        self.drink = drink
+        self.size = size
+        self.milk = milk
+        self.shots = shots
+        self.status = "pending"
+        self.paid = False
+        self.card_last_four = None
 
-def place_order(drink, size="medium", milk="whole", shots=1):
-    global next_order_id
+    @property
+    def cost(self):
+        base = {"small": 2.50, "medium": 3.00, "large": 3.50}
+        return base.get(self.size, 3.00) + (self.shots - 1) * 0.50
 
-    order = {
-        "id": next_order_id,
-        "drink": drink,
-        "size": size,
-        "milk": milk,
-        "shots": shots,
-        "status": "pending",
-        "cost": calculate_cost(size, shots),
-        "paid": False
-    }
-    orders[next_order_id] = order
-    next_order_id += 1
+    def __str__(self):
+        return f"#{self.id}: {self.size} {self.drink}, {self.milk} milk, {self.shots} shots - ${self.cost:.2f}"
 
-    print(f"Order placed! Order #{order['id']}")
-    print(f"  {size} {drink}, {milk} milk, {shots} shot(s)")
-    print(f"  Cost: ${order['cost']:.2f}")
-    return order
 
-def calculate_cost(size, shots):
-    base = {"small": 2.50, "medium": 3.00, "large": 3.50}
-    return base.get(size, 3.00) + (shots - 1) * 0.50
+class Payment:
+    def __init__(self, card_number, amount):
+        self.card_number = card_number
+        self.amount = amount
 
-def update_order(order_id, **changes):
-    if order_id not in orders:
-        print(f"Order #{order_id} not found")
-        return None
+    @property
+    def last_four(self):
+        return self.card_number[-4:]
 
-    order = orders[order_id]
 
-    if order["status"] != "pending":
-        print(f"Sorry, order #{order_id} is already being prepared. Can't modify it.")
-        return None
+class Shop:
+    def __init__(self):
+        self.orders = {}
+        self.next_id = 1
 
-    for key, value in changes.items():
-        if key in order and key not in ["id", "status", "paid"]:
-            order[key] = value
+    def place_order(self, drink, size="medium", milk="whole", shots=1):
+        order = Order(self.next_id, drink, size, milk, shots)
+        self.orders[order.id] = order
+        self.next_id += 1
 
-    # recalculate cost
-    order["cost"] = calculate_cost(order["size"], order["shots"])
+        print(f"Order placed! {order}")
+        return order
 
-    print(f"Order #{order_id} updated!")
-    print(f"  {order['size']} {order['drink']}, {order['milk']} milk, {order['shots']} shot(s)")
-    print(f"  New cost: ${order['cost']:.2f}")
-    return order
+    def update_order(self, order_id, **changes):
+        order = self.orders.get(order_id)
+        if not order:
+            print(f"Order #{order_id} not found")
+            return None
 
-def pay_for_order(order_id, card_number, amount):
-    if order_id not in orders:
-        print(f"Order #{order_id} not found")
-        return False
+        if order.status != "pending":
+            print(f"Sorry, order #{order_id} is already being prepared. Can't modify it.")
+            return None
 
-    order = orders[order_id]
+        for key, value in changes.items():
+            if hasattr(order, key) and key not in ["id", "status", "paid"]:
+                setattr(order, key, value)
 
-    if order["paid"]:
-        print(f"Order #{order_id} is already paid")
+        print(f"Order updated! {order}")
+        return order
+
+    def pay(self, order_id, payment):
+        order = self.orders.get(order_id)
+        if not order:
+            print(f"Order #{order_id} not found")
+            return False
+
+        if order.paid:
+            print(f"Order #{order_id} is already paid")
+            return True
+
+        if payment.amount < order.cost:
+            print(f"Insufficient amount. Order costs ${order.cost:.2f}")
+            return False
+
+        order.paid = True
+        order.card_last_four = payment.last_four
+
+        print(f"Payment accepted for order #{order_id} (card ending {payment.last_four})")
         return True
 
-    if amount < order["cost"]:
-        print(f"Insufficient amount. Order costs ${order['cost']:.2f}")
-        return False
+    def get_pending_orders(self):
+        pending = [o for o in self.orders.values() if o.paid and o.status == "pending"]
 
-    # pretend we're processing the card
-    order["paid"] = True
-    order["card_last_four"] = card_number[-4:]
+        if not pending:
+            print("No orders to prepare")
+            return []
 
-    print(f"Payment accepted for order #{order_id}")
-    print(f"  Card ending in {order['card_last_four']}")
-    return True
+        print(f"Orders to prepare: {len(pending)}")
+        for o in pending:
+            print(f"  {o}")
+        return pending
 
-def get_pending_orders():
-    """Barista checks what orders need to be made"""
-    pending = [o for o in orders.values() if o["paid"] and o["status"] == "pending"]
+    def start_preparing(self, order_id):
+        order = self.orders.get(order_id)
+        if not order:
+            print(f"Order #{order_id} not found")
+            return False
 
-    if not pending:
-        print("No orders to prepare")
-        return []
+        if not order.paid:
+            print(f"Order #{order_id} hasn't been paid yet")
+            return False
 
-    print(f"Orders to prepare: {len(pending)}")
-    for o in pending:
-        print(f"  #{o['id']}: {o['size']} {o['drink']}, {o['milk']} milk, {o['shots']} shots")
-    return pending
+        order.status = "preparing"
+        print(f"Started preparing order #{order_id}")
+        return True
 
-def start_preparing(order_id):
-    """Barista starts making the order"""
-    if order_id not in orders:
-        print(f"Order #{order_id} not found")
-        return False
+    def complete_order(self, order_id):
+        order = self.orders.get(order_id)
+        if not order:
+            print(f"Order #{order_id} not found")
+            return False
 
-    order = orders[order_id]
+        order.status = "ready"
+        print(f"Order #{order_id} is ready for pickup!")
+        return True
 
-    if not order["paid"]:
-        print(f"Order #{order_id} hasn't been paid yet")
-        return False
+    def deliver_order(self, order_id):
+        order = self.orders.get(order_id)
+        if not order:
+            print(f"Order #{order_id} not found")
+            return False
 
-    order["status"] = "preparing"
-    print(f"Started preparing order #{order_id}")
-    return True
+        if order.status != "ready":
+            print(f"Order #{order_id} is not ready yet")
+            return False
 
-def complete_order(order_id):
-    """Barista finishes the order"""
-    if order_id not in orders:
-        print(f"Order #{order_id} not found")
-        return False
-
-    order = orders[order_id]
-    order["status"] = "ready"
-    print(f"Order #{order_id} is ready for pickup!")
-    return True
-
-def deliver_order(order_id):
-    """Customer picks up their drink"""
-    if order_id not in orders:
-        print(f"Order #{order_id} not found")
-        return False
-
-    order = orders[order_id]
-
-    if order["status"] != "ready":
-        print(f"Order #{order_id} is not ready yet")
-        return False
-
-    order["status"] = "delivered"
-    print(f"Order #{order_id} delivered. Enjoy your {order['drink']}!")
-    return True
+        order.status = "delivered"
+        print(f"Order #{order_id} delivered. Enjoy your {order.drink}!")
+        return True
 
 
 if __name__ == "__main__":
     print("=== Restbucks Coffee Shop ===\n")
 
+    shop = Shop()
+
     # Customer places an order
     print("-- Customer: placing order --")
-    order = place_order("latte", size="large", milk="semi-skimmed", shots=2)
+    order = shop.place_order("latte", size="large", milk="semi-skimmed", shots=2)
 
     print("\n-- Customer: adding an extra shot --")
-    update_order(order["id"], shots=3)
+    shop.update_order(order.id, shots=3)
 
     print("\n-- Customer: paying --")
-    pay_for_order(order["id"], "1234567890123456", 5.00)
+    payment = Payment("1234567890123456", 5.00)
+    shop.pay(order.id, payment)
 
     print("\n-- Barista: checking orders --")
-    get_pending_orders()
+    shop.get_pending_orders()
 
     print("\n-- Barista: making the drink --")
-    start_preparing(order["id"])
+    shop.start_preparing(order.id)
 
     print("\n-- Customer tries to modify (too late!) --")
-    update_order(order["id"], shots=1)
+    shop.update_order(order.id, shots=1)
 
     print("\n-- Barista: order done --")
-    complete_order(order["id"])
+    shop.complete_order(order.id)
 
     print("\n-- Customer: picking up --")
-    deliver_order(order["id"])
+    shop.deliver_order(order.id)
