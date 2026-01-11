@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/restbucks
+      - REDIS_URL=redis://cache:6379/0
+    depends_on:
+      - db
+      - cache
+
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=restbucks
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  cache:
+    image: redis:7
+
+volumes:
+  postgres_data:

@@ -2,9 +2,12 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v12: Redis caching - cache orders for faster reads
+v13: Docker - containerized deployment
 
-Set environment variables:
+Run with:
+  docker-compose up --build
+
+Or set environment variables manually:
   export DATABASE_URL=postgresql://user:password@localhost:5432/restbucks
   export REDIS_URL=redis://localhost:6379/0
 """
