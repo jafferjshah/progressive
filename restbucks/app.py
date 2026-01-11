@@ -2,10 +2,11 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v7: HATEOAS - Hypermedia as the Engine of Application State
-The response tells the client what actions are available next.
+v8: JSON file persistence - data survives server restarts
 """
 
+import json
+import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -13,9 +14,28 @@ from typing import Optional
 
 app = FastAPI()
 
-# our "database"
-orders = {}
-next_order_id = 1
+DATA_FILE = "orders.json"
+
+
+def load_data():
+    """Load orders from JSON file"""
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            data = json.load(f)
+            # JSON keys are strings, convert back to int
+            orders = {int(k): v for k, v in data["orders"].items()}
+            return orders, data["next_id"]
+    return {}, 1
+
+
+def save_data():
+    """Save orders to JSON file"""
+    with open(DATA_FILE, "w") as f:
+        json.dump({"orders": orders, "next_id": next_order_id}, f, indent=2)
+
+
+# load on startup
+orders, next_order_id = load_data()
 
 
 def calculate_cost(size, shots):
@@ -28,38 +48,27 @@ def get_order_links(order, base_url):
     links = []
     order_url = f"{base_url}/orders/{order['id']}"
 
-    # self link is always available
     links.append({"rel": "self", "href": order_url, "method": "GET"})
 
     if order["status"] == "pending" and not order["paid"]:
-        # can update, pay, or cancel
         links.append({"rel": "update", "href": order_url, "method": "PUT"})
         links.append({"rel": "payment", "href": f"{order_url}/payment", "method": "PUT"})
         links.append({"rel": "cancel", "href": order_url, "method": "DELETE"})
 
     elif order["status"] == "pending" and order["paid"]:
-        # paid but not started - barista can start preparing
         links.append({"rel": "prepare", "href": f"{order_url}/status?status=preparing", "method": "PUT"})
 
     elif order["status"] == "preparing":
-        # being made - can mark ready
         links.append({"rel": "ready", "href": f"{order_url}/status?status=ready", "method": "PUT"})
 
     elif order["status"] == "ready":
-        # ready - can deliver
         links.append({"rel": "deliver", "href": f"{order_url}/status?status=delivered", "method": "PUT"})
-
-    # delivered = no more actions
 
     return links
 
 
 def order_with_links(order, base_url):
-    """Return order with hypermedia links"""
-    return {
-        **order,
-        "links": get_order_links(order, base_url)
-    }
+    return {**order, "links": get_order_links(order, base_url)}
 
 
 class OrderRequest(BaseModel):
@@ -81,8 +90,6 @@ class PaymentRequest(BaseModel):
     amount: float
 
 
-# Customer endpoints
-
 @app.post("/orders", status_code=201)
 def create_order(order_req: OrderRequest, request: Request):
     global next_order_id
@@ -100,6 +107,7 @@ def create_order(order_req: OrderRequest, request: Request):
     }
     orders[next_order_id] = order
     next_order_id += 1
+    save_data()
 
     return order_with_links(order, base_url)
 
@@ -139,6 +147,7 @@ def update_order(order_id: int, update: OrderUpdate, request: Request):
         order["shots"] = update.shots
 
     order["cost"] = calculate_cost(order["size"], order["shots"])
+    save_data()
 
     return order_with_links(order, base_url)
 
@@ -153,16 +162,14 @@ def pay_order(order_id: int, payment: PaymentRequest, request: Request):
     order = orders[order_id]
 
     if order["paid"]:
-        return JSONResponse(
-            status_code=200,
-            content=order_with_links(order, base_url)
-        )
+        return JSONResponse(status_code=200, content=order_with_links(order, base_url))
 
     if payment.amount < order["cost"]:
         raise HTTPException(status_code=400, detail=f"Insufficient amount. Need ${order['cost']:.2f}")
 
     order["paid"] = True
     order["card_last_four"] = payment.card_number[-4:]
+    save_data()
 
     return order_with_links(order, base_url)
 
@@ -183,15 +190,13 @@ def cancel_order(order_id: int, request: Request):
         raise HTTPException(status_code=409, detail="Cannot cancel - order is already paid")
 
     del orders[order_id]
+    save_data()
 
-    # return link to create new order
     return {
         "message": "Order cancelled",
         "links": [{"rel": "create_order", "href": f"{base_url}/orders", "method": "POST"}]
     }
 
-
-# Barista endpoints
 
 @app.get("/orders")
 def get_all_orders(request: Request, status: Optional[str] = None, paid: Optional[bool] = None):
@@ -223,6 +228,8 @@ def update_status(order_id: int, status: str, request: Request):
         raise HTTPException(status_code=409, detail="Cannot prepare - order not paid")
 
     order["status"] = status
+    save_data()
+
     return order_with_links(order, base_url)
 
 
