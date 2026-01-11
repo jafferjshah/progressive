@@ -2,10 +2,11 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v11: PostgreSQL - real database server
+v12: Redis caching - cache orders for faster reads
 
-Set DATABASE_URL environment variable:
+Set environment variables:
   export DATABASE_URL=postgresql://user:password@localhost:5432/restbucks
+  export REDIS_URL=redis://localhost:6379/0
 """
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -16,10 +17,10 @@ from sqlalchemy.orm import Session
 
 from database import engine, get_db, Base
 from models import Order
+from cache import cache_order, get_cached_order, invalidate_order
 
 app = FastAPI()
 
-# create tables
 Base.metadata.create_all(bind=engine)
 
 
@@ -51,8 +52,7 @@ def get_order_links(order_dict, base_url):
     return links
 
 
-def order_with_links(order, base_url):
-    order_dict = order.to_dict()
+def order_with_links(order_dict, base_url):
     return {**order_dict, "links": get_order_links(order_dict, base_url)}
 
 
@@ -92,18 +92,30 @@ def create_order(order_req: OrderRequest, request: Request, db: Session = Depend
     db.commit()
     db.refresh(order)
 
-    return order_with_links(order, base_url)
+    order_dict = order.to_dict()
+    cache_order(order.id, order_dict)
+
+    return order_with_links(order_dict, base_url)
 
 
 @app.get("/orders/{order_id}")
 def get_order(order_id: int, request: Request, db: Session = Depends(get_db)):
     base_url = str(request.base_url).rstrip("/")
 
+    # try cache first
+    cached = get_cached_order(order_id)
+    if cached:
+        return order_with_links(cached, base_url)
+
+    # cache miss - query database
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    return order_with_links(order, base_url)
+    order_dict = order.to_dict()
+    cache_order(order_id, order_dict)
+
+    return order_with_links(order_dict, base_url)
 
 
 @app.put("/orders/{order_id}")
@@ -133,7 +145,10 @@ def update_order(order_id: int, update: OrderUpdate, request: Request, db: Sessi
     db.commit()
     db.refresh(order)
 
-    return order_with_links(order, base_url)
+    order_dict = order.to_dict()
+    cache_order(order_id, order_dict)  # update cache
+
+    return order_with_links(order_dict, base_url)
 
 
 @app.put("/orders/{order_id}/payment", status_code=201)
@@ -145,7 +160,7 @@ def pay_order(order_id: int, payment: PaymentRequest, request: Request, db: Sess
         raise HTTPException(status_code=404, detail="Order not found")
 
     if order.paid:
-        return JSONResponse(status_code=200, content=order_with_links(order, base_url))
+        return JSONResponse(status_code=200, content=order_with_links(order.to_dict(), base_url))
 
     if payment.amount < order.cost:
         raise HTTPException(status_code=400, detail=f"Insufficient amount. Need ${order.cost:.2f}")
@@ -155,7 +170,10 @@ def pay_order(order_id: int, payment: PaymentRequest, request: Request, db: Sess
     db.commit()
     db.refresh(order)
 
-    return order_with_links(order, base_url)
+    order_dict = order.to_dict()
+    cache_order(order_id, order_dict)
+
+    return order_with_links(order_dict, base_url)
 
 
 @app.delete("/orders/{order_id}")
@@ -174,6 +192,7 @@ def cancel_order(order_id: int, request: Request, db: Session = Depends(get_db))
 
     db.delete(order)
     db.commit()
+    invalidate_order(order_id)  # remove from cache
 
     return {
         "message": "Order cancelled",
@@ -193,7 +212,7 @@ def get_all_orders(request: Request, db: Session = Depends(get_db), status: Opti
         query = query.filter(Order.paid == paid)
 
     orders = query.all()
-    return [order_with_links(o, base_url) for o in orders]
+    return [order_with_links(o.to_dict(), base_url) for o in orders]
 
 
 @app.put("/orders/{order_id}/status")
@@ -216,7 +235,10 @@ def update_status(order_id: int, status: str, request: Request, db: Session = De
     db.commit()
     db.refresh(order)
 
-    return order_with_links(order, base_url)
+    order_dict = order.to_dict()
+    cache_order(order_id, order_dict)
+
+    return order_with_links(order_dict, base_url)
 
 
 if __name__ == "__main__":
