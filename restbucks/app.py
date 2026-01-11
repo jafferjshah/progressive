@@ -2,11 +2,10 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v8: JSON file persistence - data survives server restarts
+v9: SQLite with raw SQL - real database, see the queries
 """
 
-import json
-import os
+import sqlite3
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,28 +13,50 @@ from typing import Optional
 
 app = FastAPI()
 
-DATA_FILE = "orders.json"
+DB_FILE = "restbucks.db"
 
 
-def load_data():
-    """Load orders from JSON file"""
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            data = json.load(f)
-            # JSON keys are strings, convert back to int
-            orders = {int(k): v for k, v in data["orders"].items()}
-            return orders, data["next_id"]
-    return {}, 1
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row  # return dicts instead of tuples
+    return conn
 
 
-def save_data():
-    """Save orders to JSON file"""
-    with open(DATA_FILE, "w") as f:
-        json.dump({"orders": orders, "next_id": next_order_id}, f, indent=2)
+def init_db():
+    conn = get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            drink TEXT NOT NULL,
+            size TEXT NOT NULL,
+            milk TEXT NOT NULL,
+            shots INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            cost REAL NOT NULL,
+            paid INTEGER NOT NULL DEFAULT 0,
+            card_last_four TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
 
-# load on startup
-orders, next_order_id = load_data()
+init_db()
+
+
+def row_to_order(row):
+    """Convert database row to order dict"""
+    return {
+        "id": row["id"],
+        "drink": row["drink"],
+        "size": row["size"],
+        "milk": row["milk"],
+        "shots": row["shots"],
+        "status": row["status"],
+        "cost": row["cost"],
+        "paid": bool(row["paid"]),
+        "card_last_four": row["card_last_four"]
+    }
 
 
 def calculate_cost(size, shots):
@@ -44,7 +65,6 @@ def calculate_cost(size, shots):
 
 
 def get_order_links(order, base_url):
-    """Generate hypermedia links based on order state"""
     links = []
     order_url = f"{base_url}/orders/{order['id']}"
 
@@ -92,105 +112,134 @@ class PaymentRequest(BaseModel):
 
 @app.post("/orders", status_code=201)
 def create_order(order_req: OrderRequest, request: Request):
-    global next_order_id
     base_url = str(request.base_url).rstrip("/")
+    cost = calculate_cost(order_req.size, order_req.shots)
 
-    order = {
-        "id": next_order_id,
-        "drink": order_req.drink,
-        "size": order_req.size,
-        "milk": order_req.milk,
-        "shots": order_req.shots,
-        "status": "pending",
-        "cost": calculate_cost(order_req.size, order_req.shots),
-        "paid": False
-    }
-    orders[next_order_id] = order
-    next_order_id += 1
-    save_data()
+    conn = get_db()
+    cursor = conn.execute(
+        "INSERT INTO orders (drink, size, milk, shots, status, cost, paid) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (order_req.drink, order_req.size, order_req.milk, order_req.shots, "pending", cost, 0)
+    )
+    order_id = cursor.lastrowid
+    conn.commit()
 
-    return order_with_links(order, base_url)
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+
+    return order_with_links(row_to_order(row), base_url)
 
 
 @app.get("/orders/{order_id}")
 def get_order(order_id: int, request: Request):
     base_url = str(request.base_url).rstrip("/")
 
-    if order_id not in orders:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+
+    if not row:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    return order_with_links(orders[order_id], base_url)
+    return order_with_links(row_to_order(row), base_url)
 
 
 @app.put("/orders/{order_id}")
 def update_order(order_id: int, update: OrderUpdate, request: Request):
     base_url = str(request.base_url).rstrip("/")
 
-    if order_id not in orders:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+
+    if not row:
+        conn.close()
         raise HTTPException(status_code=404, detail="Order not found")
 
-    order = orders[order_id]
+    order = row_to_order(row)
 
     if order["status"] != "pending":
+        conn.close()
         raise HTTPException(status_code=409, detail="Order is already being prepared")
 
     if order["paid"]:
+        conn.close()
         raise HTTPException(status_code=409, detail="Cannot modify - order is already paid")
 
-    if update.drink:
-        order["drink"] = update.drink
-    if update.size:
-        order["size"] = update.size
-    if update.milk:
-        order["milk"] = update.milk
-    if update.shots:
-        order["shots"] = update.shots
+    # update fields
+    drink = update.drink or order["drink"]
+    size = update.size or order["size"]
+    milk = update.milk or order["milk"]
+    shots = update.shots or order["shots"]
+    cost = calculate_cost(size, shots)
 
-    order["cost"] = calculate_cost(order["size"], order["shots"])
-    save_data()
+    conn.execute(
+        "UPDATE orders SET drink=?, size=?, milk=?, shots=?, cost=? WHERE id=?",
+        (drink, size, milk, shots, cost, order_id)
+    )
+    conn.commit()
 
-    return order_with_links(order, base_url)
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+
+    return order_with_links(row_to_order(row), base_url)
 
 
 @app.put("/orders/{order_id}/payment", status_code=201)
 def pay_order(order_id: int, payment: PaymentRequest, request: Request):
     base_url = str(request.base_url).rstrip("/")
 
-    if order_id not in orders:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+
+    if not row:
+        conn.close()
         raise HTTPException(status_code=404, detail="Order not found")
 
-    order = orders[order_id]
+    order = row_to_order(row)
 
     if order["paid"]:
+        conn.close()
         return JSONResponse(status_code=200, content=order_with_links(order, base_url))
 
     if payment.amount < order["cost"]:
+        conn.close()
         raise HTTPException(status_code=400, detail=f"Insufficient amount. Need ${order['cost']:.2f}")
 
-    order["paid"] = True
-    order["card_last_four"] = payment.card_number[-4:]
-    save_data()
+    conn.execute(
+        "UPDATE orders SET paid=1, card_last_four=? WHERE id=?",
+        (payment.card_number[-4:], order_id)
+    )
+    conn.commit()
 
-    return order_with_links(order, base_url)
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+
+    return order_with_links(row_to_order(row), base_url)
 
 
 @app.delete("/orders/{order_id}")
 def cancel_order(order_id: int, request: Request):
     base_url = str(request.base_url).rstrip("/")
 
-    if order_id not in orders:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+
+    if not row:
+        conn.close()
         raise HTTPException(status_code=404, detail="Order not found")
 
-    order = orders[order_id]
+    order = row_to_order(row)
 
     if order["status"] != "pending":
+        conn.close()
         raise HTTPException(status_code=409, detail="Cannot cancel - order is being prepared")
 
     if order["paid"]:
+        conn.close()
         raise HTTPException(status_code=409, detail="Cannot cancel - order is already paid")
 
-    del orders[order_id]
-    save_data()
+    conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
+    conn.commit()
+    conn.close()
 
     return {
         "message": "Order cancelled",
@@ -201,36 +250,54 @@ def cancel_order(order_id: int, request: Request):
 @app.get("/orders")
 def get_all_orders(request: Request, status: Optional[str] = None, paid: Optional[bool] = None):
     base_url = str(request.base_url).rstrip("/")
-    result = list(orders.values())
+
+    conn = get_db()
+
+    query = "SELECT * FROM orders WHERE 1=1"
+    params = []
 
     if status:
-        result = [o for o in result if o["status"] == status]
+        query += " AND status = ?"
+        params.append(status)
     if paid is not None:
-        result = [o for o in result if o["paid"] == paid]
+        query += " AND paid = ?"
+        params.append(1 if paid else 0)
 
-    return [order_with_links(o, base_url) for o in result]
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    return [order_with_links(row_to_order(r), base_url) for r in rows]
 
 
 @app.put("/orders/{order_id}/status")
 def update_status(order_id: int, status: str, request: Request):
     base_url = str(request.base_url).rstrip("/")
 
-    if order_id not in orders:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+
+    if not row:
+        conn.close()
         raise HTTPException(status_code=404, detail="Order not found")
 
-    order = orders[order_id]
+    order = row_to_order(row)
     valid_statuses = ["pending", "preparing", "ready", "delivered"]
 
     if status not in valid_statuses:
+        conn.close()
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
 
     if status == "preparing" and not order["paid"]:
+        conn.close()
         raise HTTPException(status_code=409, detail="Cannot prepare - order not paid")
 
-    order["status"] = status
-    save_data()
+    conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+    conn.commit()
 
-    return order_with_links(order, base_url)
+    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+
+    return order_with_links(row_to_order(row), base_url)
 
 
 if __name__ == "__main__":
