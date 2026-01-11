@@ -2,7 +2,10 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v10: SQLAlchemy ORM - cleaner database code
+v11: PostgreSQL - real database server
+
+Set DATABASE_URL environment variable:
+  export DATABASE_URL=postgresql://user:password@localhost:5432/restbucks
 """
 
 from fastapi import FastAPI, HTTPException, Request, Depends
