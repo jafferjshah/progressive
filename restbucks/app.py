@@ -2,7 +2,7 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v4: Naive web API - all POST, always 200, status in body
+v5: Basic REST - resource-oriented URLs, but still mostly POST
 """
 
 from fastapi import FastAPI
@@ -19,8 +19,10 @@ def calculate_cost(size, shots):
     return base.get(size, 3.00) + (shots - 1) * 0.50
 
 
-@app.post("/placeOrder")
-def place_order(drink: str, size: str = "medium", milk: str = "whole", shots: int = 1):
+# Customer endpoints
+
+@app.post("/orders")
+def create_order(drink: str, size: str = "medium", milk: str = "whole", shots: int = 1):
     global next_order_id
 
     order = {
@@ -39,7 +41,15 @@ def place_order(drink: str, size: str = "medium", milk: str = "whole", shots: in
     return {"success": True, "order": order}
 
 
-@app.post("/updateOrder")
+@app.post("/orders/{order_id}")
+def get_order(order_id: int):
+    if order_id not in orders:
+        return {"success": False, "error": "Order not found"}
+
+    return {"success": True, "order": orders[order_id]}
+
+
+@app.post("/orders/{order_id}/update")
 def update_order(order_id: int, drink: str = None, size: str = None, milk: str = None, shots: int = None):
     if order_id not in orders:
         return {"success": False, "error": "Order not found"}
@@ -63,7 +73,7 @@ def update_order(order_id: int, drink: str = None, size: str = None, milk: str =
     return {"success": True, "order": order}
 
 
-@app.post("/payOrder")
+@app.post("/orders/{order_id}/payment")
 def pay_order(order_id: int, card_number: str, amount: float):
     if order_id not in orders:
         return {"success": False, "error": "Order not found"}
@@ -82,13 +92,15 @@ def pay_order(order_id: int, card_number: str, amount: float):
     return {"success": True, "message": "Payment accepted"}
 
 
-@app.post("/getPendingOrders")
+# Barista endpoints
+
+@app.post("/orders/pending")
 def get_pending_orders():
     pending = [o for o in orders.values() if o["paid"] and o["status"] == "pending"]
     return {"success": True, "orders": pending}
 
 
-@app.post("/startPreparing")
+@app.post("/orders/{order_id}/prepare")
 def start_preparing(order_id: int):
     if order_id not in orders:
         return {"success": False, "error": "Order not found"}
@@ -102,7 +114,7 @@ def start_preparing(order_id: int):
     return {"success": True, "message": "Started preparing"}
 
 
-@app.post("/completeOrder")
+@app.post("/orders/{order_id}/ready")
 def complete_order(order_id: int):
     if order_id not in orders:
         return {"success": False, "error": "Order not found"}
@@ -112,7 +124,7 @@ def complete_order(order_id: int):
     return {"success": True, "message": "Order ready"}
 
 
-@app.post("/deliverOrder")
+@app.post("/orders/{order_id}/deliver")
 def deliver_order(order_id: int):
     if order_id not in orders:
         return {"success": False, "error": "Order not found"}
@@ -124,14 +136,6 @@ def deliver_order(order_id: int):
 
     order["status"] = "delivered"
     return {"success": True, "message": "Order delivered"}
-
-
-@app.post("/getOrder")
-def get_order(order_id: int):
-    if order_id not in orders:
-        return {"success": False, "error": "Order not found"}
-
-    return {"success": True, "order": orders[order_id]}
 
 
 if __name__ == "__main__":
