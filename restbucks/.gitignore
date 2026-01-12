@@ -3,3 +3,5 @@ __pycache__/
 .env
 orders.json
 *.db
+architecture.svg
+RUNNING.md
