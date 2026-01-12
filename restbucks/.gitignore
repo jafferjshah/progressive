@@ -5,3 +5,5 @@ orders.json
 *.db
 architecture.svg
 RUNNING.md
+DOCKER.md
+docker-arch.svg
