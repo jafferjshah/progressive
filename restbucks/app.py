@@ -2,13 +2,17 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v15: Rate Limiting - prevent API abuse
+v16: Circuit Breaker - fail fast when database is down
 
 Run with:
   docker-compose up --build
 
-Test rate limiting (10 requests/minute per IP):
-  for i in {1..15}; do curl -s http://localhost:8000/health; echo; done
+Test circuit breaker:
+  1. Stop db: docker-compose stop db
+  2. Make requests - after 3 failures, circuit opens
+  3. Restart db: docker-compose start db
+  4. Wait 10 seconds, circuit moves to half-open
+  5. Successful request closes the circuit
 """
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -16,8 +20,45 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
+import time
 
 from database import engine, get_db, Base
+
+
+class CircuitBreaker:
+    """Simple circuit breaker: closed -> open -> half-open -> closed"""
+
+    def __init__(self, failure_threshold=3, recovery_timeout=10):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.state = "closed"
+        self.last_failure_time = None
+
+    def can_execute(self):
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "half-open"
+                return True
+            return False
+        if self.state == "half-open":
+            return True
+        return False
+
+    def record_success(self):
+        self.failures = 0
+        self.state = "closed"
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.failure_threshold:
+            self.state = "open"
+
+
+db_circuit = CircuitBreaker()
 from models import Order
 from cache import cache_order, get_cached_order, invalidate_order, r as redis_client
 from sqlalchemy import text
@@ -56,7 +97,7 @@ async def rate_limit_middleware(request: Request, call_next):
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
     """Check if database and cache are reachable"""
-    health = {"status": "healthy", "db": False, "cache": False}
+    health = {"status": "healthy", "db": False, "cache": False, "circuit": db_circuit.state}
 
     # check database
     try:
@@ -73,6 +114,12 @@ def health_check(db: Session = Depends(get_db)):
         health["status"] = "unhealthy"
 
     return health
+
+
+def require_db_circuit():
+    """Check circuit breaker before database operations"""
+    if not db_circuit.can_execute():
+        raise HTTPException(status_code=503, detail="Service unavailable - circuit open")
 
 Base.metadata.create_all(bind=engine)
 
@@ -130,20 +177,26 @@ class PaymentRequest(BaseModel):
 
 @app.post("/orders", status_code=201)
 def create_order(order_req: OrderRequest, request: Request, db: Session = Depends(get_db)):
+    require_db_circuit()
     base_url = str(request.base_url).rstrip("/")
 
-    order = Order(
-        drink=order_req.drink,
-        size=order_req.size,
-        milk=order_req.milk,
-        shots=order_req.shots,
-        status="pending",
-        cost=calculate_cost(order_req.size, order_req.shots),
-        paid=False
-    )
-    db.add(order)
-    db.commit()
-    db.refresh(order)
+    try:
+        order = Order(
+            drink=order_req.drink,
+            size=order_req.size,
+            milk=order_req.milk,
+            shots=order_req.shots,
+            status="pending",
+            cost=calculate_cost(order_req.size, order_req.shots),
+            paid=False
+        )
+        db.add(order)
+        db.commit()
+        db.refresh(order)
+        db_circuit.record_success()
+    except Exception as e:
+        db_circuit.record_failure()
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
     order_dict = order.to_dict()
     cache_order(order.id, order_dict)
