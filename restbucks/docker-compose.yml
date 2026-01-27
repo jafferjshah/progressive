@@ -8,9 +8,18 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/restbucks
       - REDIS_URL=redis://cache:6379/0
+      - PAYMENT_URL=http://payment:8001
     depends_on:
       - db
       - cache
+      - payment
+
+  payment:
+    build:
+      context: .
+      dockerfile: Dockerfile.payment
+    ports:
+      - "8001:8001"
 
   db:
     image: postgres:15

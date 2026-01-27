@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # install dependencies
-RUN pip install fastapi uvicorn sqlalchemy psycopg2-binary redis
+RUN pip install fastapi uvicorn sqlalchemy psycopg2-binary redis requests
 
 # copy app code
 COPY *.py .

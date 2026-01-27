@@ -2,17 +2,15 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v16: Circuit Breaker - fail fast when database is down
+v17: Bulkhead - isolate payment service calls
 
 Run with:
   docker-compose up --build
 
-Test circuit breaker:
-  1. Stop db: docker-compose stop db
-  2. Make requests - after 3 failures, circuit opens
-  3. Restart db: docker-compose start db
-  4. Wait 10 seconds, circuit moves to half-open
-  5. Successful request closes the circuit
+Test bulkhead (max 3 concurrent payment calls):
+  1. In browser, open http://localhost:8001/docs
+  2. Fire 10 payment requests simultaneously with delay=5
+  3. First 3 process, remaining 7 fail fast with 503
 """
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -21,8 +19,32 @@ from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 import time
+import os
+import threading
+import requests
 
 from database import engine, get_db, Base
+
+PAYMENT_URL = os.getenv("PAYMENT_URL", "http://localhost:8001")
+
+
+class Bulkhead:
+    """Limits concurrent calls to a service"""
+
+    def __init__(self, max_concurrent=3):
+        self.max_concurrent = max_concurrent
+        self.semaphore = threading.Semaphore(max_concurrent)
+
+    def acquire(self) -> bool:
+        """Try to acquire a slot, returns False if full"""
+        return self.semaphore.acquire(blocking=False)
+
+    def release(self):
+        """Release a slot"""
+        self.semaphore.release()
+
+
+payment_bulkhead = Bulkhead(max_concurrent=3)
 
 
 class CircuitBreaker:
@@ -96,8 +118,8 @@ async def rate_limit_middleware(request: Request, call_next):
 
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
-    """Check if database and cache are reachable"""
-    health = {"status": "healthy", "db": False, "cache": False, "circuit": db_circuit.state}
+    """Check if database, cache, and payment service are reachable"""
+    health = {"status": "healthy", "db": False, "cache": False, "payment": False, "circuit": db_circuit.state}
 
     # check database
     try:
@@ -110,6 +132,13 @@ def health_check(db: Session = Depends(get_db)):
     try:
         redis_client.ping()
         health["cache"] = True
+    except:
+        health["status"] = "unhealthy"
+
+    # check payment service
+    try:
+        resp = requests.get(f"{PAYMENT_URL}/health", timeout=2)
+        health["payment"] = resp.status_code == 200
     except:
         health["status"] = "unhealthy"
 
@@ -258,7 +287,7 @@ def update_order(order_id: int, update: OrderUpdate, request: Request, db: Sessi
 
 
 @app.put("/orders/{order_id}/payment", status_code=201)
-def pay_order(order_id: int, payment: PaymentRequest, request: Request, db: Session = Depends(get_db)):
+def pay_order(order_id: int, payment: PaymentRequest, request: Request, db: Session = Depends(get_db), delay: int = 0):
     base_url = str(request.base_url).rstrip("/")
 
     order = db.query(Order).filter(Order.id == order_id).first()
@@ -270,6 +299,24 @@ def pay_order(order_id: int, payment: PaymentRequest, request: Request, db: Sess
 
     if payment.amount < order.cost:
         raise HTTPException(status_code=400, detail=f"Insufficient amount. Need ${order.cost:.2f}")
+
+    # bulkhead: limit concurrent payment calls
+    if not payment_bulkhead.acquire():
+        raise HTTPException(status_code=503, detail="Payment service busy - try again later")
+
+    try:
+        # call payment service
+        resp = requests.post(
+            f"{PAYMENT_URL}/pay?delay={delay}",
+            json={"order_id": order_id, "amount": order.cost, "card_last_four": payment.card_number[-4:]},
+            timeout=30
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="Payment failed")
+    except requests.RequestException:
+        raise HTTPException(status_code=503, detail="Payment service unavailable")
+    finally:
+        payment_bulkhead.release()
 
     order.paid = True
     order.card_last_four = payment.card_number[-4:]
