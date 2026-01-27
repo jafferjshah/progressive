@@ -2,13 +2,13 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v14: Health Probe - liveness endpoint for monitoring
+v15: Rate Limiting - prevent API abuse
 
 Run with:
   docker-compose up --build
 
-Test health:
-  curl http://localhost:8000/health
+Test rate limiting (10 requests/minute per IP):
+  for i in {1..15}; do curl -s http://localhost:8000/health; echo; done
 """
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -23,6 +23,34 @@ from cache import cache_order, get_cached_order, invalidate_order, r as redis_cl
 from sqlalchemy import text
 
 app = FastAPI()
+
+# Rate limiting: 10 requests per minute per IP
+RATE_LIMIT = 10
+RATE_WINDOW = 60  # seconds
+
+
+def check_rate_limit(client_ip: str) -> bool:
+    """Returns True if request is allowed, False if rate limited"""
+    key = f"rate:{client_ip}"
+    count = redis_client.incr(key)
+    if count == 1:
+        redis_client.expire(key, RATE_WINDOW)
+    return count <= RATE_LIMIT
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    # skip rate limiting for health checks
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    client_ip = request.client.host
+    if not check_rate_limit(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests. Try again later."}
+        )
+    return await call_next(request)
 
 
 @app.get("/health")
