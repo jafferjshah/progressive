@@ -2,14 +2,13 @@
 Restbucks - A simple coffee ordering system
 Based on: https://www.infoq.com/articles/webber-rest-workflow/
 
-v13: Docker - containerized deployment
+v14: Health Probe - liveness endpoint for monitoring
 
 Run with:
   docker-compose up --build
 
-Or set environment variables manually:
-  export DATABASE_URL=postgresql://user:password@localhost:5432/restbucks
-  export REDIS_URL=redis://localhost:6379/0
+Test health:
+  curl http://localhost:8000/health
 """
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -20,9 +19,32 @@ from sqlalchemy.orm import Session
 
 from database import engine, get_db, Base
 from models import Order
-from cache import cache_order, get_cached_order, invalidate_order
+from cache import cache_order, get_cached_order, invalidate_order, r as redis_client
+from sqlalchemy import text
 
 app = FastAPI()
+
+
+@app.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    """Check if database and cache are reachable"""
+    health = {"status": "healthy", "db": False, "cache": False}
+
+    # check database
+    try:
+        db.execute(text("SELECT 1"))
+        health["db"] = True
+    except:
+        health["status"] = "unhealthy"
+
+    # check cache
+    try:
+        redis_client.ping()
+        health["cache"] = True
+    except:
+        health["status"] = "unhealthy"
+
+    return health
 
 Base.metadata.create_all(bind=engine)
 
